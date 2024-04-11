@@ -1,0 +1,7 @@
+[project]
+name = "benchy"
+
+[service.equinix]
+project = "EQUINIX_PROJECT"
+api_key = "EQUINIX_API_KEY"
+
