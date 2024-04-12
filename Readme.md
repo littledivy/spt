@@ -1,7 +1,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/littledivy/spt.svg)](https://pkg.go.dev/github.com/littledivy/spt)
 
 ```
-spt(3)
+spt(1)
 
 Usage:
   spt provision

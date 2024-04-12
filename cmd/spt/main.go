@@ -11,7 +11,7 @@ import (
   spt "github.com/littledivy/spt"
 )
 
-const help = `spt(3)
+const help = `spt(1)
 
 Usage:
   spt provision
