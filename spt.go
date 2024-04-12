@@ -26,10 +26,8 @@ type (
 	Config struct {
 		Service Service
 		Project Project
-	}
-
-	Project struct {
-		Name string
+		Build   Build
+		Run     Run
 	}
 
 	Service struct {
@@ -39,6 +37,22 @@ type (
 			SpotPriceMax    float32 `toml:"spot_price_max"`
 			Plan            string
 			OperatingSystem string `toml:"os"`
+		}
+	}
+
+	Project struct {
+		Name string
+	}
+
+	Build struct {
+		Args struct {
+			Passthrough []string
+		}
+	}
+
+	Run struct {
+		Env struct {
+			Passthrough []string
 		}
 	}
 )
@@ -232,13 +246,14 @@ func (c *Client) Provision() (*MetalDevice, error) {
 		time.Sleep(10 * time.Second)
 	}
 
-	metalDevice := &MetalDevice{device: newDevice, ipAddr: ipAddr, client: client}
+	metalDevice := &MetalDevice{device: newDevice, ipAddr: ipAddr, client: client, config: config}
 	return metalDevice, nil
 }
 
 type MetalDevice struct {
 	device *metal.Device
 	client *metal.APIClient
+	config Config
 	ipAddr string
 }
 
@@ -265,13 +280,6 @@ func (c *MetalDevice) Run(detach bool) {
 		return
 	}
 
-	// Setup docker context
-	// cli, err := dclient.NewClientWithOpts(dclient.FromEnv, dclient.WithAPIVersionNegotiation())
-	// if err != nil {
-	//   panic(err)
-	// }
-	// defer cli.Close()
-
 	spawnCmd := fmt.Sprintf("docker context create remote2 --docker \"host=%s\"", sshHost)
 	Log("Creating docker context")
 	cmd = exec.Command("sh", "-c", spawnCmd)
@@ -284,7 +292,12 @@ func (c *MetalDevice) Run(detach bool) {
 	Log("Building docker image")
 	randomId := time.Now().Unix()
 	name := "spt-image-" + fmt.Sprint(randomId)
-	cmd = exec.Command("docker", "--context", "remote2", "build", "-t", name, ".")
+	cmd = exec.Command("docker", "--context", "remote2", "build")
+	for _, arg := range c.config.Build.Args.Passthrough {
+		cmd.Args = append(cmd.Args, "--build-arg", arg)
+	}
+	cmd.Args = append(cmd.Args, "-t", name, ".")
+
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -294,22 +307,15 @@ func (c *MetalDevice) Run(detach bool) {
 		return
 	}
 
-	// resp, err := cli.ImageBuild(ctx, nil, types.ImageBuildOptions{})
-	// if err != nil {
-	//   fmt.Println(err)
-	//   return
-	// }
-	// defer resp.Body.Close()
-	//
-	// termFd, isTerm := term.GetFdInfo(os.Stderr)
-	// jsonmessage.DisplayJSONMessagesStream(resp.Body, os.Stderr, termFd, isTerm, nil)
-
 	Log("Running docker image. Detached: %v", detach)
+	cmd = exec.Command("docker", "--context", "remote2", "run")
 	if detach {
-		cmd = exec.Command("docker", "--context", "remote2", "run", "-d", "--rm", "-t", "-i", name)
-	} else {
-		cmd = exec.Command("docker", "--context", "remote2", "run", "--rm", "-t", "-i", name)
+		cmd.Args = append(cmd.Args, "-d")
 	}
+	for _, env := range c.config.Run.Env.Passthrough {
+		cmd.Args = append(cmd.Args, "-e", env)
+	}
+	cmd.Args = append(cmd.Args, "--rm", "-t", "-i", name)
 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

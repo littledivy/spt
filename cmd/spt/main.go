@@ -17,6 +17,7 @@ Usage:
   spt provision
   spt run [--detach]
   spt self [--delete]
+  spt validate
 
 Options:
   -h, --help  Show this screen.
@@ -69,6 +70,8 @@ func main() {
   provisionCmd := flag.NewFlagSet("provision", flag.ExitOnError)
   runCmd := flag.NewFlagSet("run", flag.ExitOnError)
   selfCmd := flag.NewFlagSet("self", flag.ExitOnError)
+  validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
+
   detach := runCmd.Bool("d", false, "Detach local client")
   delete := selfCmd.Bool("delete", false, "Deprovision device")
 
@@ -81,6 +84,8 @@ func main() {
     runCmd.Parse(os.Args[2:])
   case "self":
     selfCmd.Parse(os.Args[2:])
+  case "validate":
+    validateCmd.Parse(os.Args[2:])
   default:
     fmt.Println("Unrecognized command:", os.Args[1])
     flag.Usage()
@@ -104,6 +109,11 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+
+  if validateCmd.Parsed() {
+    spt.Log("OK")
+    return
+  }
 
   client := spt.NewClient(config)
   device, err = client.Provision()

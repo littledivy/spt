@@ -7,3 +7,9 @@ api_key = "EQUINIX_API_KEY"
 spot_price_max = 0.2
 plan = "m3.small.x86"
 os = "ubuntu_22_04"
+
+[build.args]
+passthrough = ["BUILD_ARG_1"]
+
+[run.env]
+passthrough = ["RUN_ENV_1"]
