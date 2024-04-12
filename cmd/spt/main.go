@@ -15,11 +15,14 @@ const help = `spt(3)
 
 Usage:
   spt provision
-  spt run
+  spt run [--detach]
+  spt self [--delete]
 
 Options:
   -h, --help  Show this screen.
   -c, --config  Configuration file [default: spt.toml]
+  -d, --detach  Detach local client
+  --delete  Deprovision device
 `
 
 func readConfig(name string) (spt.Config, error) {
@@ -65,6 +68,9 @@ func main() {
 
   provisionCmd := flag.NewFlagSet("provision", flag.ExitOnError)
   runCmd := flag.NewFlagSet("run", flag.ExitOnError)
+  selfCmd := flag.NewFlagSet("self", flag.ExitOnError)
+  detach := runCmd.Bool("d", false, "Detach local client")
+  delete := selfCmd.Bool("delete", false, "Deprovision device")
 
   configFile := flag.String("config", "spt.toml", "Configuration file")
 
@@ -73,6 +79,8 @@ func main() {
     provisionCmd.Parse(os.Args[2:])
   case "run":
     runCmd.Parse(os.Args[2:])
+  case "self":
+    selfCmd.Parse(os.Args[2:])
   default:
     fmt.Println("Unrecognized command:", os.Args[1])
     flag.Usage()
@@ -81,6 +89,16 @@ func main() {
 
   godotenv.Load()
 
+  var device *spt.MetalDevice
+  if selfCmd.Parsed() {
+    device = spt.NewSelfDevice()
+    if *delete {
+      device.Delete()
+    }
+
+    return
+  }
+
 	config, err := readConfig(*configFile)
 	if err != nil {
 		fmt.Println(err)
@@ -88,13 +106,13 @@ func main() {
 	}
 
   client := spt.NewClient(config)
-  device, err := client.Provision()
+  device, err = client.Provision()
   if err != nil {
     fmt.Println(err)
     os.Exit(1)
   }
 
   if runCmd.Parsed() {
-    device.Run()
+    device.Run(*detach)
   }
 }

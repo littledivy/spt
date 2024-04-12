@@ -11,7 +11,7 @@ help: ## Show this help
 
 spt: ## Build the binary
 	for CMD in `ls cmd`; do \
-		GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(LDFLAGS) cmd/$$CMD; \
+		GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(LDFLAGS) cmd/$$CMD/main.go; \
 	done
 
 spt.wasm: ## Build the wasm file
@@ -19,10 +19,10 @@ spt.wasm: ## Build the wasm file
 	cp $(GOROOT)/misc/wasm/wasm_exec.js .
 
 install: spt ## Install the binary
-	cp spt $(INSTALL_DIR)
+	cp main $(INSTALL_DIR)/spt
 
 clean: ## Clean the build
-	rm -f spt spt.wasm wasm_exec.js
+	rm -f main spt.wasm wasm_exec.js
 
 fmt: ## Format the code
 	go fmt

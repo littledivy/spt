@@ -1,9 +1,0 @@
-spt(3)
-
-Usage:
-  spt provision
-  spt run
-
-Options:
-  -h, --help  Show this screen.
-  -c, --config  Configuration file [default: spt.toml]

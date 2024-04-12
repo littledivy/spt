@@ -2,7 +2,11 @@ package spt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"time"
@@ -30,11 +34,11 @@ type (
 
 	Service struct {
 		Equinix struct {
-			Project string
-			ApiKey  string `toml:"api_key"`
-      SpotPriceMax float32 `toml:"spot_price_max"`
-      Plan string
-      OperatingSystem string `toml:"os"`
+			Project         string
+			ApiKey          string  `toml:"api_key"`
+			SpotPriceMax    float32 `toml:"spot_price_max"`
+			Plan            string
+			OperatingSystem string `toml:"os"`
 		}
 	}
 )
@@ -54,6 +58,7 @@ type DeviceCreator interface {
 	SetSpotInstance(bool)
 	SetSpotPriceMax(float32)
 	SetTerminationTime(time.Time)
+	SetCustomdata(map[string]interface{})
 }
 
 type OneOfDeviceCreator interface {
@@ -65,12 +70,66 @@ var _ DeviceCreator = (*metal.DeviceCreateInMetroInput)(nil)
 var _ DeviceCreator = (*metal.DeviceCreateInFacilityInput)(nil)
 
 func NewClient(cfg Config) Client {
-  apiKey := cfg.Service.Equinix.ApiKey
+	apiKey := cfg.Service.Equinix.ApiKey
 	config := metal.NewConfiguration()
 	config.AddDefaultHeader("X-Auth-Token", apiKey)
 
 	client := metal.NewAPIClient(config)
-  return Client{metal: client, config: cfg}
+	return Client{metal: client, config: cfg}
+}
+
+func fetchMetadata() Metadata {
+	url := "http://metadata.platformequinix.com/metadata"
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if resp.StatusCode != 200 {
+		log.Fatalf("Error: %s", resp.Status)
+	}
+
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var metadata Metadata
+	err = json.Unmarshal(body, &metadata)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return metadata
+}
+
+type Metadata struct {
+	Customdata struct {
+		ApiKey string `json:"api_key"`
+	} `json:"customdata"`
+	Id string `json:"id"`
+}
+
+func NewSelfDevice() *MetalDevice {
+	metadata := fetchMetadata()
+
+	config := metal.NewConfiguration()
+	config.AddDefaultHeader("X-Auth-Token", metadata.Customdata.ApiKey)
+	client := metal.NewAPIClient(config)
+
+	device, _, err := client.DevicesApi.FindDeviceById(context.TODO(), metadata.Id).Execute()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return &MetalDevice{device: device, client: client}
 }
 
 const userScript = `#!/bin/bash
@@ -90,14 +149,14 @@ systemctl restart docker
 `
 
 type Client struct {
-  metal *metal.APIClient
-  config Config
+	metal  *metal.APIClient
+	config Config
 }
 
 func (c *Client) Provision() (*MetalDevice, error) {
 	var ipAddr string
-  config := c.config
-  client := c.metal
+	config := c.config
+	client := c.metal
 
 	var dc DeviceCreator
 	var createRequest metal.CreateDeviceRequest
@@ -108,16 +167,24 @@ func (c *Client) Provision() (*MetalDevice, error) {
 		Metro: metro,
 	}
 	createRequest = metal.CreateDeviceRequest{DeviceCreateInMetroInput: dc.(*metal.DeviceCreateInMetroInput)}
+
 	dc.SetSpotInstance(true)
-	dc.SetSpotPriceMax(0.2)
-	dc.SetPlan("m3.small.x86")
-	dc.SetOperatingSystem("ubuntu_22_04")
-	dc.SetHostname("spt-instance")
+	dc.SetHostname(config.Project.Name + "-spt-instance")
 	dc.SetUserdata(userScript)
+	dc.SetCustomdata(map[string]interface{}{"api_key": config.Service.Equinix.ApiKey})
+
+	if config.Service.Equinix.SpotPriceMax != 0 {
+		dc.SetSpotPriceMax(config.Service.Equinix.SpotPriceMax)
+	}
+	if config.Service.Equinix.Plan != "" {
+		dc.SetPlan(config.Service.Equinix.Plan)
+	}
+	if config.Service.Equinix.OperatingSystem != "" {
+		dc.SetOperatingSystem(config.Service.Equinix.OperatingSystem)
+	}
 
 	Log("Provisioning a spot instance")
 
-	println(config.Service.Equinix.Project)
 	projectID := config.Service.Equinix.Project
 	newDevice, _, err := client.DevicesApi.CreateDevice(context.TODO(), projectID).CreateDeviceRequest(createRequest).Execute()
 	if err != nil {
@@ -165,28 +232,34 @@ func (c *Client) Provision() (*MetalDevice, error) {
 		time.Sleep(10 * time.Second)
 	}
 
-  metalDevice := &MetalDevice{device: newDevice, ipAddr: ipAddr, client: client}
-  return metalDevice, nil
+	metalDevice := &MetalDevice{device: newDevice, ipAddr: ipAddr, client: client}
+	return metalDevice, nil
 }
 
 type MetalDevice struct {
-  device *metal.Device
-  client *metal.APIClient
-  ipAddr string
+	device *metal.Device
+	client *metal.APIClient
+	ipAddr string
 }
 
-func (c *MetalDevice) Run() {
+func (c *MetalDevice) Run(detach bool) {
 	// Setup SSH
 	sshHost := fmt.Sprintf("ssh://root@%s", c.ipAddr)
 	Log(sshHost)
 
+	cmd := exec.Command("ssh-keygen", "-R", c.ipAddr)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+
 	waitForInit := "cloud-init status --wait"
-	cmd := exec.Command("ssh", sshHost, waitForInit)
+	cmd = exec.Command("ssh", sshHost, waitForInit)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-  err := cmd.Run()
+	err := cmd.Run()
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -209,7 +282,7 @@ func (c *MetalDevice) Run() {
 	}
 
 	Log("Building docker image")
-  randomId := time.Now().Unix()
+	randomId := time.Now().Unix()
 	name := "spt-image-" + fmt.Sprint(randomId)
 	cmd = exec.Command("docker", "--context", "remote2", "build", "-t", name, ".")
 	cmd.Stdin = os.Stdin
@@ -231,8 +304,13 @@ func (c *MetalDevice) Run() {
 	// termFd, isTerm := term.GetFdInfo(os.Stderr)
 	// jsonmessage.DisplayJSONMessagesStream(resp.Body, os.Stderr, termFd, isTerm, nil)
 
-	Log("Running docker image")
-	cmd = exec.Command("docker", "--context", "remote2", "run", "--rm", "-t", "-i", name)
+	Log("Running docker image. Detached: %v", detach)
+	if detach {
+		cmd = exec.Command("docker", "--context", "remote2", "run", "-d", "--rm", "-t", "-i", name)
+	} else {
+		cmd = exec.Command("docker", "--context", "remote2", "run", "--rm", "-t", "-i", name)
+	}
+
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -248,8 +326,14 @@ func (c *MetalDevice) Run() {
 		return
 	}
 
+	if !detach {
+		c.Delete()
+	}
+}
+
+func (c *MetalDevice) Delete() {
 	Log("De-provisioning the spot instance")
-	_, err = c.client.DevicesApi.DeleteDevice(context.TODO(), c.device.GetId()).Execute()
+	_, err := c.client.DevicesApi.DeleteDevice(context.TODO(), c.device.GetId()).Execute()
 	if err != nil {
 		fmt.Println(err)
 		return

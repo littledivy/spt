@@ -4,4 +4,6 @@ name = "benchy"
 [service.equinix]
 project = "EQUINIX_PROJECT"
 api_key = "EQUINIX_API_KEY"
-
+spot_price_max = 0.2
+plan = "m3.small.x86"
+os = "ubuntu_22_04"
