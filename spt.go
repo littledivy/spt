@@ -250,6 +250,23 @@ func (c *Client) Provision() (*MetalDevice, error) {
 	return metalDevice, nil
 }
 
+func (c *Client) Attach(id string) (*MetalDevice, error) {
+	device, _, err := c.metal.DevicesApi.FindDeviceById(context.TODO(), id).Execute()
+	if err != nil {
+		return nil, err
+	}
+
+	var ipAddr string
+	for _, ip := range device.GetIpAddresses() {
+		if ip.GetPublic() && ip.GetAddressFamily() == 4 {
+			ipAddr = ip.GetAddress()
+		}
+	}
+
+	metalDevice := &MetalDevice{device: device, ipAddr: ipAddr, client: c.metal, config: c.config}
+	return metalDevice, nil
+}
+
 type MetalDevice struct {
 	device *metal.Device
 	client *metal.APIClient
@@ -257,7 +274,7 @@ type MetalDevice struct {
 	ipAddr string
 }
 
-func (c *MetalDevice) Run(detach bool) {
+func (c *MetalDevice) Run(detach bool, args []string) {
 	// Setup SSH
 	sshHost := fmt.Sprintf("ssh://root@%s", c.ipAddr)
 	Log(sshHost)
@@ -280,6 +297,9 @@ func (c *MetalDevice) Run(detach bool) {
 		return
 	}
 
+	cmd = exec.Command("docker", "context", "rm", "remote2")
+	cmd.Run()
+
 	spawnCmd := fmt.Sprintf("docker context create remote2 --docker \"host=%s\"", sshHost)
 	Log("Creating docker context")
 	cmd = exec.Command("sh", "-c", spawnCmd)
@@ -296,7 +316,7 @@ func (c *MetalDevice) Run(detach bool) {
 	for _, arg := range c.config.Build.Args.Passthrough {
 		cmd.Args = append(cmd.Args, "--build-arg", arg)
 	}
-	cmd.Args = append(cmd.Args, "-t", name, ".")
+	cmd.Args = append(cmd.Args, "--ssh", "default", "-t", name, ".")
 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -316,6 +336,7 @@ func (c *MetalDevice) Run(detach bool) {
 		cmd.Args = append(cmd.Args, "-e", env)
 	}
 	cmd.Args = append(cmd.Args, "--rm", "-t", "-i", name)
+	cmd.Args = append(cmd.Args, args...)
 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

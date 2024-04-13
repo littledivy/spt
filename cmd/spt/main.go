@@ -18,10 +18,12 @@ Usage:
   spt run [--detach]
   spt self [--delete]
   spt validate
+  spt attach --id
 
 Options:
   -h, --help  Show this screen.
   -c, --config  Configuration file [default: spt.toml]
+  -i, --id  Device ID
   -d, --detach  Detach local client
   --delete  Deprovision device
 `
@@ -71,9 +73,11 @@ func main() {
   runCmd := flag.NewFlagSet("run", flag.ExitOnError)
   selfCmd := flag.NewFlagSet("self", flag.ExitOnError)
   validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
+  attachCmd := flag.NewFlagSet("attach", flag.ExitOnError)
 
   detach := runCmd.Bool("d", false, "Detach local client")
   delete := selfCmd.Bool("delete", false, "Deprovision device")
+  attachId := attachCmd.String("id", "", "Device ID")
 
   configFile := flag.String("config", "spt.toml", "Configuration file")
 
@@ -86,11 +90,14 @@ func main() {
     selfCmd.Parse(os.Args[2:])
   case "validate":
     validateCmd.Parse(os.Args[2:])
+  case "attach":
+    attachCmd.Parse(os.Args[2:])
   default:
     fmt.Println("Unrecognized command:", os.Args[1])
     flag.Usage()
     os.Exit(1)
   }
+  rest := runCmd.Args()
 
   godotenv.Load()
 
@@ -116,13 +123,17 @@ func main() {
   }
 
   client := spt.NewClient(config)
-  device, err = client.Provision()
+  if attachCmd.Parsed() {
+    device, err = client.Attach(*attachId)
+  } else {
+    device, err = client.Provision()
+  }
   if err != nil {
     fmt.Println(err)
     os.Exit(1)
   }
 
-  if runCmd.Parsed() {
-    device.Run(*detach)
+  if runCmd.Parsed() || attachCmd.Parsed() {
+    device.Run(*detach, rest)
   }
 }
