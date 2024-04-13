@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/yegor256/tacit@gh-pages/tacit-css-1.7.1.min.css">
+  <body>
+        <p>
+          <strong>spt</strong> is a spot instance provisioning and orchestration tool for Equinix Metal.
+        </p>
+        <p>
+          <code>
+curl -fsSL https://spt.divy.work/install.sh
+          </code>
+        </p>
+
+        <p><a href="https://github.com/littledivy/spt">github.com/littledivy/spt</a></p>
+        <img src="https://raw.githubusercontent.com/littledivy/spt/main/demo.gif" alt="spt">
+        
+        <h2>Reference</h2>
+        <pre>spt(1)
+
+Usage:
+  spt provision
+  spt run
+  spt self
+  spt attach
+  spt validate
+
+Options:
+  -h, --help  Show this screen.
+  -c, --config  Configuration file [default: spt.toml]
+  -d, --detach  Detach local client
+  --delete  Deprovision device
+  --id  Device ID
+        </pre>
+
+        <h2>Example configuration</h2>
+        <pre># spt.toml
+
+[project]
+name = "example"
+
+[service.equinix]
+project = "EQUINIX_PROJECT"
+api_key = "EQUINIX_API_KEY"
+spot_price_max = 0.2
+plan = "m3.small.x86"
+os = "ubuntu_22_04"
+
+[build.args]
+passthrough = ["BUILD_ARG_1"]
+
+[run.env]
+passthrough = ["RUN_ENV_1"]
+        </pre>
+  </body>
+</html>
