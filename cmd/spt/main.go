@@ -98,6 +98,9 @@ func main() {
     os.Exit(1)
   }
   rest := runCmd.Args()
+  if len(rest) == 0 {
+    rest = attachCmd.Args()
+  }
 
   godotenv.Load()
 

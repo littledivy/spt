@@ -286,7 +286,7 @@ func (c *MetalDevice) Run(detach bool, args []string) {
 	cmd.Run()
 
 	waitForInit := "cloud-init status --wait"
-	cmd = exec.Command("ssh", sshHost, waitForInit)
+	cmd = exec.Command("ssh", "-o", "StrictHostKeyChecking=no", sshHost, waitForInit)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
