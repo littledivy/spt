@@ -347,7 +347,6 @@ cat > /opt/spt/aws-credentials.json << 'EOL'
   "session_token": "` + config.Service.AWS.SessionToken + `"
 }
 EOL
-chmod 600 /opt/spt/aws-credentials.json
 `
 	completeScript := userScript + "\n" + credsScript
 	userData := base64.StdEncoding.EncodeToString([]byte(completeScript))
