@@ -140,7 +140,6 @@ func fetchAWSMetadata() (string, bool) {
 		Timeout: 2 * time.Second,
 	}
 
-	// Check if it's an EC2 instance by hitting the metadata service
 	tokenUrl := "http://169.254.169.254/latest/api/token"
 	req, err := http.NewRequest("PUT", tokenUrl, nil)
 	if err != nil {
@@ -217,36 +216,49 @@ func NewSelfDevice() Device {
 	if ok {
 		Log("Detected AWS EC2 instance: %s", instanceId)
 
-		// Get region from instance metadata
-		awsCfg, err := config.LoadDefaultConfig(context.TODO())
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		ec2Client := ec2.NewFromConfig(awsCfg)
-
-		// Get the instance's public IP to show in logs
-		input := &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceId},
-		}
-
-		result, err := ec2Client.DescribeInstances(context.TODO(), input)
-		if err != nil {
-			log.Fatal(err)
-		}
+		// For self-device operations inside an EC2 instance, we don't need
+		// to initialize a full AWS client with credentials since we can use
+		// instance metadata service for self-operations
 
 		var ipAddr string
-		if len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
-			instance := result.Reservations[0].Instances[0]
-			if instance.PublicIpAddress != nil {
-				ipAddr = *instance.PublicIpAddress
+
+		client := &http.Client{
+			Timeout: 2 * time.Second,
+		}
+
+		// First get a token for IMDSv2
+		tokenUrl := "http://169.254.169.254/latest/api/token"
+		req, err := http.NewRequest("PUT", tokenUrl, nil)
+		if err == nil {
+			req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
+			resp, err := client.Do(req)
+			if err == nil && resp.StatusCode == 200 {
+				tokenBody, err := ioutil.ReadAll(resp.Body)
+				resp.Body.Close()
+
+				if err == nil {
+					token := string(tokenBody)
+					// Get public IP
+					ipUrl := "http://169.254.169.254/latest/meta-data/public-ipv4"
+					req, err = http.NewRequest("GET", ipUrl, nil)
+					if err == nil {
+						req.Header.Set("X-aws-ec2-metadata-token", token)
+						resp, err = client.Do(req)
+						if err == nil && resp.StatusCode == 200 {
+							ipBytes, err := ioutil.ReadAll(resp.Body)
+							resp.Body.Close()
+							if err == nil {
+								ipAddr = string(ipBytes)
+							}
+						}
+					}
+				}
 			}
 		}
 
 		return &AWSInstance{
 			instanceId: instanceId,
 			ipAddr:     ipAddr,
-			client:     ec2Client,
 		}
 	}
 
@@ -713,6 +725,28 @@ func (c *AWSInstance) Run(detach bool, args []string) {
 
 func (c *AWSInstance) Delete() {
 	Log("Terminating the AWS spot instance")
+
+	// Check if this is a self-termination (running from inside the instance)
+	selfInstanceId, isSelf := fetchAWSMetadata()
+	if isSelf && selfInstanceId == c.instanceId {
+		Log("Self-terminating EC2 instance %s", c.instanceId)
+
+		// Run shutdown -h now command to terminate the instance
+		cmd := exec.Command("sudo", "shutdown", "-h", "now")
+		err := cmd.Run()
+		if err != nil {
+			fmt.Println("Error self-terminating instance:", err)
+			return
+		}
+		return
+	}
+
+	// If not self-terminating, use the AWS API with credentials
+	if c.client == nil {
+		fmt.Println("Error: AWS client not initialized for external termination")
+		return
+	}
+
 	_, err := c.client.TerminateInstances(context.TODO(), &ec2.TerminateInstancesInput{
 		InstanceIds: []string{c.instanceId},
 	})
