@@ -336,7 +336,21 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 
 	Log("Provisioning AWS spot instance")
 
-	userData := base64.StdEncoding.EncodeToString([]byte(userScript))
+	credsScript := `
+# AWS credentials for self-termination
+:/creds
+cat > /opt/spt/aws-credentials.json << 'EOL'
+{
+  "region": "` + config.Service.AWS.Region + `",
+  "access_key": "` + config.Service.AWS.AccessKey + `",
+  "secret_key": "` + config.Service.AWS.SecretKey + `",
+  "session_token": "` + config.Service.AWS.SessionToken + `"
+}
+EOL
+chmod 600 /opt/spt/aws-credentials.json
+`
+	completeScript := userScript + "\n" + credsScript
+	userData := base64.StdEncoding.EncodeToString([]byte(completeScript))
 
 	spotPrice := fmt.Sprintf("%f", config.Service.AWS.SpotPriceMax)
 
@@ -662,8 +676,8 @@ func runRemoteDocker(ipAddr string, config Config, detach bool, args []string) {
 	for _, env := range config.Run.Env.Passthrough {
 		cmd.Args = append(cmd.Args, "-e", env)
 	}
-	// Add host network mode to allow accessing AWS metadata service
-	cmd.Args = append(cmd.Args, "--rm", "--network=host", "-t", "-i", name)
+
+	cmd.Args = append(cmd.Args, "--rm", "--network=host", "-v", "/opt/spt:/opt/spt", "-t", "-i", name)
 	cmd.Args = append(cmd.Args, args...)
 
 	cmd.Stdin = os.Stdin
@@ -726,22 +740,63 @@ func (c *AWSInstance) Run(detach bool, args []string) {
 func (c *AWSInstance) Delete() {
 	Log("Terminating the AWS spot instance")
 
-	// Check if this is a self-termination (running from inside the instance)
 	selfInstanceId, isSelf := fetchAWSMetadata()
 	if isSelf && selfInstanceId == c.instanceId {
 		Log("Self-terminating EC2 instance %s", c.instanceId)
 
-		// Run shutdown -h now command to terminate the instance
-		cmd := exec.Command("sudo", "shutdown", "-h", "now")
-		err := cmd.Run()
+		credsFile := "/opt/spt/aws-credentials.json"
+
+		credsData, err := ioutil.ReadFile(credsFile)
 		if err != nil {
-			fmt.Println("Error self-terminating instance:", err)
+			Log("Error reading AWS credentials: %v", err)
+			Log("If running in Docker, make sure to mount /opt/spt from host")
 			return
 		}
+
+		var creds struct {
+			Region       string `json:"region"`
+			AccessKey    string `json:"access_key"`
+			SecretKey    string `json:"secret_key"`
+			SessionToken string `json:"session_token"`
+		}
+
+		if err := json.Unmarshal(credsData, &creds); err != nil {
+			Log("Error parsing AWS credentials: %v", err)
+			return
+		}
+
+		awsCfg, err := config.LoadDefaultConfig(context.TODO(),
+			config.WithRegion(creds.Region),
+			config.WithCredentialsProvider(aws.CredentialsProviderFunc(
+				func(ctx context.Context) (aws.Credentials, error) {
+					return aws.Credentials{
+						AccessKeyID:     creds.AccessKey,
+						SecretAccessKey: creds.SecretKey,
+						SessionToken:    creds.SessionToken,
+					}, nil
+				},
+			)),
+		)
+		if err != nil {
+			Log("Error creating AWS config: %v", err)
+			return
+		}
+
+		ec2Client := ec2.NewFromConfig(awsCfg)
+
+		Log("Terminating instance %s using stored credentials", c.instanceId)
+		_, err = ec2Client.TerminateInstances(context.TODO(), &ec2.TerminateInstancesInput{
+			InstanceIds: []string{c.instanceId},
+		})
+		if err != nil {
+			Log("Error terminating instance: %v", err)
+			return
+		}
+
+		Log("Instance termination initiated")
 		return
 	}
 
-	// If not self-terminating, use the AWS API with credentials
 	if c.client == nil {
 		fmt.Println("Error: AWS client not initialized for external termination")
 		return
@@ -771,7 +826,6 @@ func (c *AWSInstance) Delete() {
 			spotRequestId := *instance.SpotInstanceRequestId
 			Log("Canceling spot request %s", spotRequestId)
 
-			// Cancel the spot instance request
 			cancelInput := &ec2.CancelSpotInstanceRequestsInput{
 				SpotInstanceRequestIds: []string{spotRequestId},
 			}
