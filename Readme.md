@@ -1,5 +1,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/littledivy/spt.svg)](https://pkg.go.dev/github.com/littledivy/spt)
 
+> **Note:** Equinix Metal is [sunsetting](https://deploy.equinix.com/blog/sunsetting-equinix-metal/) on June 2026. Please use AWS EC2 Spot instance support instead.
+
 ```
 spt(1)
 
