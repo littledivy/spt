@@ -267,7 +267,6 @@ func NewSelfDevice() Device {
 }
 
 const userScript = `#!/bin/bash
-#!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get upgrade -y
@@ -281,6 +280,9 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin m
 echo '{ "userland-proxy": false }' > /etc/docker/daemon.json
 sudo usermod -aG docker ubuntu
 systemctl restart docker
+
+# Create directory for SPT credentials
+mkdir -p /opt/spt
 `
 
 type Device interface {
@@ -338,7 +340,6 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 
 	credsScript := `
 # AWS credentials for self-termination
-:/creds
 cat > /opt/spt/aws-credentials.json << 'EOL'
 {
   "region": "` + config.Service.AWS.Region + `",
@@ -347,6 +348,7 @@ cat > /opt/spt/aws-credentials.json << 'EOL'
   "session_token": "` + config.Service.AWS.SessionToken + `"
 }
 EOL
+chmod 600 /opt/spt/aws-credentials.json
 `
 	completeScript := userScript + "\n" + credsScript
 	userData := base64.StdEncoding.EncodeToString([]byte(completeScript))
