@@ -20,13 +20,6 @@ import (
 	metal "github.com/equinix/equinix-sdk-go/services/metalv1"
 )
 
-// import (
-//  "github.com/docker/docker/api/types"
-//  dclient "github.com/docker/docker/client"
-//  "github.com/docker/docker/pkg/jsonmessage"
-//  "github.com/moby/term"
-// )
-
 type (
 	Config struct {
 		Service Service
@@ -231,10 +224,8 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 
 	Log("Provisioning AWS spot instance")
 
-	// Create the launch specification
 	userData := base64.StdEncoding.EncodeToString([]byte(userScript))
 
-	// Set up spot instance request
 	spotPrice := fmt.Sprintf("%f", config.Service.AWS.SpotPriceMax)
 
 	input := &ec2.RequestSpotInstancesInput{
@@ -256,7 +247,6 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 		},
 	}
 
-	// Request the spot instance
 	result, err := c.ec2.RequestSpotInstances(context.TODO(), input)
 	if err != nil {
 		return nil, err
@@ -269,13 +259,11 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 	spotRequestId := *result.SpotInstanceRequests[0].SpotInstanceRequestId
 	Log("Spot request %s created, waiting for instance", spotRequestId)
 
-	// Wait for spot instance to be fulfilled
 	var instanceId string
 	describeInput := &ec2.DescribeSpotInstanceRequestsInput{
 		SpotInstanceRequestIds: []string{spotRequestId},
 	}
 
-	// Poll until we get an instance ID
 	for {
 		describeResult, err := c.ec2.DescribeSpotInstanceRequests(context.TODO(), describeInput)
 		if err != nil {
@@ -300,7 +288,6 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Wait for instance to be running
 	instanceInput := &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceId},
 	}
@@ -333,7 +320,6 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Wait for SSH to be available
 	Log("Waiting for SSH to be available...")
 	for i := 0; i < 30; i++ {
 		cmd := exec.Command("nc", "-z", "-w", "1", ipAddr, "22")
@@ -343,7 +329,6 @@ func (c *Client) provisionAWS() (*AWSInstance, error) {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Wait additional time for cloud-init to complete
 	time.Sleep(30 * time.Second)
 
 	awsInstance := &AWSInstance{
@@ -440,17 +425,14 @@ func (c *Client) provisionEquinix() (*MetalDevice, error) {
 }
 
 func (c *Client) Attach(id string) (Device, error) {
-	// Check if this is an AWS instance ID (i-xxxxxxxx format)
 	if len(id) > 2 && id[:2] == "i-" {
 		return c.attachAWS(id)
 	}
 
-	// Otherwise assume it's an Equinix Metal device
 	return c.attachEquinix(id)
 }
 
 func (c *Client) attachAWS(instanceId string) (*AWSInstance, error) {
-	// Get instance details
 	input := &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceId},
 	}
