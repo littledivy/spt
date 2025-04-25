@@ -650,7 +650,8 @@ func runRemoteDocker(ipAddr string, config Config, detach bool, args []string) {
 	for _, env := range config.Run.Env.Passthrough {
 		cmd.Args = append(cmd.Args, "-e", env)
 	}
-	cmd.Args = append(cmd.Args, "--rm", "-t", "-i", name)
+	// Add host network mode to allow accessing AWS metadata service
+	cmd.Args = append(cmd.Args, "--rm", "--network=host", "-t", "-i", name)
 	cmd.Args = append(cmd.Args, args...)
 
 	cmd.Stdin = os.Stdin
