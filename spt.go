@@ -2,6 +2,7 @@ package spt
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -11,6 +12,10 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/equinix/equinix-sdk-go/services/metalv1"
 	metal "github.com/equinix/equinix-sdk-go/services/metalv1"
 )
@@ -37,6 +42,17 @@ type (
 			SpotPriceMax    float32 `toml:"spot_price_max"`
 			Plan            string
 			OperatingSystem string `toml:"os"`
+		}
+		AWS struct {
+			Region        string
+			AccessKey     string `toml:"access_key"`
+			SecretKey     string `toml:"secret_key"`
+			SessionToken  string `toml:"session_token"`
+			InstanceType  string `toml:"instance_type"`
+			AMI           string
+			SecurityGroup string  `toml:"security_group"`
+			SpotPriceMax  float32 `toml:"spot_price_max"`
+			KeyName       string  `toml:"key_name"`
 		}
 	}
 
@@ -162,12 +178,185 @@ echo '{ "userland-proxy": false }' > /etc/docker/daemon.json
 systemctl restart docker
 `
 
+type Device interface {
+	Run(detach bool, args []string)
+	Delete()
+}
+
 type Client struct {
 	metal  *metal.APIClient
+	ec2    *ec2.Client
 	config Config
 }
 
-func (c *Client) Provision() (*MetalDevice, error) {
+func NewAWSClient(cfg Config) (*Client, error) {
+	accessKey := cfg.Service.AWS.AccessKey
+	secretKey := cfg.Service.AWS.SecretKey
+	sessionToken := cfg.Service.AWS.SessionToken
+	region := cfg.Service.AWS.Region
+
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(region),
+		config.WithCredentialsProvider(aws.CredentialsProviderFunc(
+			func(ctx context.Context) (aws.Credentials, error) {
+				return aws.Credentials{
+					AccessKeyID:     accessKey,
+					SecretAccessKey: secretKey,
+					SessionToken:    sessionToken,
+				}, nil
+			},
+		)),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ec2Client := ec2.NewFromConfig(awsCfg)
+	return &Client{ec2: ec2Client, config: cfg}, nil
+}
+
+func (c *Client) Provision() (Device, error) {
+	config := c.config
+
+	// Check which provider to use
+	if config.Service.AWS.Region != "" {
+		return c.provisionAWS()
+	}
+
+	return c.provisionEquinix()
+}
+
+func (c *Client) provisionAWS() (*AWSInstance, error) {
+	config := c.config
+
+	Log("Provisioning AWS spot instance")
+
+	// Create the launch specification
+	userData := base64.StdEncoding.EncodeToString([]byte(userScript))
+
+	// Set up spot instance request
+	spotPrice := fmt.Sprintf("%f", config.Service.AWS.SpotPriceMax)
+
+	input := &ec2.RequestSpotInstancesInput{
+		InstanceCount: aws.Int32(1),
+		SpotPrice:     aws.String(spotPrice),
+		LaunchSpecification: &types.RequestSpotLaunchSpecification{
+			ImageId:      aws.String(config.Service.AWS.AMI),
+			InstanceType: types.InstanceType(config.Service.AWS.InstanceType),
+			UserData:     aws.String(userData),
+			SecurityGroupIds: []string{
+				config.Service.AWS.SecurityGroup,
+			},
+			KeyName: func() *string {
+				if config.Service.AWS.KeyName != "" {
+					return aws.String(config.Service.AWS.KeyName)
+				}
+				return nil
+			}(),
+		},
+	}
+
+	// Request the spot instance
+	result, err := c.ec2.RequestSpotInstances(context.TODO(), input)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(result.SpotInstanceRequests) == 0 {
+		return nil, fmt.Errorf("no spot instance requests returned")
+	}
+
+	spotRequestId := *result.SpotInstanceRequests[0].SpotInstanceRequestId
+	Log("Spot request %s created, waiting for instance", spotRequestId)
+
+	// Wait for spot instance to be fulfilled
+	var instanceId string
+	describeInput := &ec2.DescribeSpotInstanceRequestsInput{
+		SpotInstanceRequestIds: []string{spotRequestId},
+	}
+
+	// Poll until we get an instance ID
+	for {
+		describeResult, err := c.ec2.DescribeSpotInstanceRequests(context.TODO(), describeInput)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(describeResult.SpotInstanceRequests) == 0 {
+			return nil, fmt.Errorf("spot instance request not found")
+		}
+
+		req := describeResult.SpotInstanceRequests[0]
+		if req.State == types.SpotInstanceStateFailed {
+			return nil, fmt.Errorf("spot instance request failed: %s", *req.Status.Message)
+		}
+
+		if req.InstanceId != nil {
+			instanceId = *req.InstanceId
+			Log("Instance %s created, waiting for it to be ready", instanceId)
+			break
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+
+	// Wait for instance to be running
+	instanceInput := &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceId},
+	}
+
+	var ipAddr string
+	for {
+		instanceResult, err := c.ec2.DescribeInstances(context.TODO(), instanceInput)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(instanceResult.Reservations) == 0 || len(instanceResult.Reservations[0].Instances) == 0 {
+			return nil, fmt.Errorf("instance not found")
+		}
+
+		instance := instanceResult.Reservations[0].Instances[0]
+
+		if instance.State.Name == types.InstanceStateNameRunning {
+			if instance.PublicIpAddress != nil {
+				ipAddr = *instance.PublicIpAddress
+				Log("Instance is running at IP %s", ipAddr)
+				break
+			}
+		}
+
+		if instance.State.Name == types.InstanceStateNameTerminated {
+			return nil, fmt.Errorf("instance was terminated")
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+
+	// Wait for SSH to be available
+	Log("Waiting for SSH to be available...")
+	for i := 0; i < 30; i++ {
+		cmd := exec.Command("nc", "-z", "-w", "1", ipAddr, "22")
+		if err := cmd.Run(); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	// Wait additional time for cloud-init to complete
+	time.Sleep(30 * time.Second)
+
+	awsInstance := &AWSInstance{
+		instanceId: instanceId,
+		ipAddr:     ipAddr,
+		client:     c.ec2,
+		config:     config,
+	}
+
+	return awsInstance, nil
+}
+
+func (c *Client) provisionEquinix() (*MetalDevice, error) {
 	var ipAddr string
 	config := c.config
 	client := c.metal
@@ -197,7 +386,7 @@ func (c *Client) Provision() (*MetalDevice, error) {
 		dc.SetOperatingSystem(config.Service.Equinix.OperatingSystem)
 	}
 
-	Log("Provisioning a spot instance")
+	Log("Provisioning Equinix Metal spot instance")
 
 	projectID := config.Service.Equinix.Project
 	newDevice, _, err := client.DevicesApi.CreateDevice(context.TODO(), projectID).CreateDeviceRequest(createRequest).Execute()
@@ -227,7 +416,7 @@ func (c *Client) Provision() (*MetalDevice, error) {
 		time.Sleep(1 * time.Second)
 	}
 
-	Log("IP %s", deviceID, ipAddr)
+	Log("IP %s", ipAddr)
 	Log("Waiting for Provisioning...")
 	stage := float32(0)
 	for {
@@ -250,7 +439,56 @@ func (c *Client) Provision() (*MetalDevice, error) {
 	return metalDevice, nil
 }
 
-func (c *Client) Attach(id string) (*MetalDevice, error) {
+func (c *Client) Attach(id string) (Device, error) {
+	// Check if this is an AWS instance ID (i-xxxxxxxx format)
+	if len(id) > 2 && id[:2] == "i-" {
+		return c.attachAWS(id)
+	}
+
+	// Otherwise assume it's an Equinix Metal device
+	return c.attachEquinix(id)
+}
+
+func (c *Client) attachAWS(instanceId string) (*AWSInstance, error) {
+	// Get instance details
+	input := &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceId},
+	}
+
+	result, err := c.ec2.DescribeInstances(context.TODO(), input)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
+		return nil, fmt.Errorf("AWS instance not found: %s", instanceId)
+	}
+
+	instance := result.Reservations[0].Instances[0]
+
+	if instance.State.Name != types.InstanceStateNameRunning {
+		return nil, fmt.Errorf("AWS instance %s is not running (state: %s)", instanceId, instance.State.Name)
+	}
+
+	if instance.PublicIpAddress == nil {
+		return nil, fmt.Errorf("AWS instance %s has no public IP address", instanceId)
+	}
+
+	ipAddr := *instance.PublicIpAddress
+
+	Log("Attached to AWS instance %s at IP %s", instanceId, ipAddr)
+
+	awsInstance := &AWSInstance{
+		instanceId: instanceId,
+		ipAddr:     ipAddr,
+		client:     c.ec2,
+		config:     c.config,
+	}
+
+	return awsInstance, nil
+}
+
+func (c *Client) attachEquinix(id string) (*MetalDevice, error) {
 	device, _, err := c.metal.DevicesApi.FindDeviceById(context.TODO(), id).Execute()
 	if err != nil {
 		return nil, err
@@ -263,23 +501,18 @@ func (c *Client) Attach(id string) (*MetalDevice, error) {
 		}
 	}
 
+	Log("Attached to Equinix Metal device %s at IP %s", id, ipAddr)
 	metalDevice := &MetalDevice{device: device, ipAddr: ipAddr, client: c.metal, config: c.config}
 	return metalDevice, nil
 }
 
-type MetalDevice struct {
-	device *metal.Device
-	client *metal.APIClient
-	config Config
-	ipAddr string
-}
-
-func (c *MetalDevice) Run(detach bool, args []string) {
+// Common run logic for all device types
+func runRemoteDocker(ipAddr string, config Config, detach bool, args []string) {
 	// Setup SSH
-	sshHost := fmt.Sprintf("ssh://root@%s", c.ipAddr)
+	sshHost := fmt.Sprintf("ssh://ubuntu@%s", ipAddr)
 	Log(sshHost)
 
-	cmd := exec.Command("ssh-keygen", "-R", c.ipAddr)
+	cmd := exec.Command("ssh-keygen", "-R", ipAddr)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -313,7 +546,7 @@ func (c *MetalDevice) Run(detach bool, args []string) {
 	randomId := time.Now().Unix()
 	name := "spt-image-" + fmt.Sprint(randomId)
 	cmd = exec.Command("docker", "--context", "remote2", "build")
-	for _, arg := range c.config.Build.Args.Passthrough {
+	for _, arg := range config.Build.Args.Passthrough {
 		cmd.Args = append(cmd.Args, "--build-arg", arg)
 	}
 	cmd.Args = append(cmd.Args, "--ssh", "default", "-t", name, ".")
@@ -332,7 +565,7 @@ func (c *MetalDevice) Run(detach bool, args []string) {
 	if detach {
 		cmd.Args = append(cmd.Args, "-d")
 	}
-	for _, env := range c.config.Run.Env.Passthrough {
+	for _, env := range config.Run.Env.Passthrough {
 		cmd.Args = append(cmd.Args, "-e", env)
 	}
 	cmd.Args = append(cmd.Args, "--rm", "-t", "-i", name)
@@ -352,6 +585,18 @@ func (c *MetalDevice) Run(detach bool, args []string) {
 		fmt.Println(err)
 		return
 	}
+}
+
+// Equinix Metal implementation
+type MetalDevice struct {
+	device *metal.Device
+	client *metal.APIClient
+	config Config
+	ipAddr string
+}
+
+func (c *MetalDevice) Run(detach bool, args []string) {
+	runRemoteDocker(c.ipAddr, c.config, detach, args)
 
 	if !detach {
 		c.Delete()
@@ -359,8 +604,35 @@ func (c *MetalDevice) Run(detach bool, args []string) {
 }
 
 func (c *MetalDevice) Delete() {
-	Log("De-provisioning the spot instance")
+	Log("De-provisioning the Equinix Metal spot instance")
 	_, err := c.client.DevicesApi.DeleteDevice(context.TODO(), c.device.GetId()).Execute()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+}
+
+// AWS implementation
+type AWSInstance struct {
+	instanceId string
+	client     *ec2.Client
+	config     Config
+	ipAddr     string
+}
+
+func (c *AWSInstance) Run(detach bool, args []string) {
+	runRemoteDocker(c.ipAddr, c.config, detach, args)
+
+	if !detach {
+		c.Delete()
+	}
+}
+
+func (c *AWSInstance) Delete() {
+	Log("Terminating the AWS spot instance")
+	_, err := c.client.TerminateInstances(context.TODO(), &ec2.TerminateInstancesInput{
+		InstanceIds: []string{c.instanceId},
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
