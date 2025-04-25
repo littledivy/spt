@@ -60,14 +60,6 @@ func readConfig(name string) (spt.Config, error) {
 		spt.Log("Service: aws")
 		config.Service.AWS.AccessKey = os.Getenv(config.Service.AWS.AccessKey)
 		config.Service.AWS.SecretKey = os.Getenv(config.Service.AWS.SecretKey)
-
-		// Check for session token (used with temporary credentials)
-		if config.Service.AWS.SessionToken != "" {
-			config.Service.AWS.SessionToken = os.Getenv(config.Service.AWS.SessionToken)
-		} else {
-			// If not explicitly set in config, check for standard AWS_SESSION_TOKEN
-			config.Service.AWS.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
-		}
 	}
 
 	return config, nil

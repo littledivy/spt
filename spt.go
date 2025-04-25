@@ -40,7 +40,6 @@ type (
 			Region        string
 			AccessKey     string `toml:"access_key"`
 			SecretKey     string `toml:"secret_key"`
-			SessionToken  string `toml:"session_token"`
 			InstanceType  string `toml:"instance_type"`
 			AMI           string
 			SecurityGroup string  `toml:"security_group"`
@@ -299,7 +298,6 @@ type Client struct {
 func NewAWSClient(cfg Config) (*Client, error) {
 	accessKey := cfg.Service.AWS.AccessKey
 	secretKey := cfg.Service.AWS.SecretKey
-	sessionToken := cfg.Service.AWS.SessionToken
 	region := cfg.Service.AWS.Region
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
@@ -309,7 +307,6 @@ func NewAWSClient(cfg Config) (*Client, error) {
 				return aws.Credentials{
 					AccessKeyID:     accessKey,
 					SecretAccessKey: secretKey,
-					SessionToken:    sessionToken,
 				}, nil
 			},
 		)),
@@ -344,8 +341,7 @@ cat > /opt/spt/aws-credentials.json << 'EOL'
 {
   "region": "` + config.Service.AWS.Region + `",
   "access_key": "` + config.Service.AWS.AccessKey + `",
-  "secret_key": "` + config.Service.AWS.SecretKey + `",
-  "session_token": "` + config.Service.AWS.SessionToken + `"
+  "secret_key": "` + config.Service.AWS.SecretKey + `"
 }
 EOL
 chmod 600 /opt/spt/aws-credentials.json
@@ -755,10 +751,9 @@ func (c *AWSInstance) Delete() {
 		}
 
 		var creds struct {
-			Region       string `json:"region"`
-			AccessKey    string `json:"access_key"`
-			SecretKey    string `json:"secret_key"`
-			SessionToken string `json:"session_token"`
+			Region    string `json:"region"`
+			AccessKey string `json:"access_key"`
+			SecretKey string `json:"secret_key"`
 		}
 
 		if err := json.Unmarshal(credsData, &creds); err != nil {
@@ -773,7 +768,6 @@ func (c *AWSInstance) Delete() {
 					return aws.Credentials{
 						AccessKeyID:     creds.AccessKey,
 						SecretAccessKey: creds.SecretKey,
-						SessionToken:    creds.SessionToken,
 					}, nil
 				},
 			)),
