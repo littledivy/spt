@@ -1,12 +1,27 @@
 [project]
 name = "benchy"
 
-[service.equinix]
-project = "EQUINIX_PROJECT"
-api_key = "EQUINIX_API_KEY"
-spot_price_max = 0.2
-plan = "m3.small.x86"
-os = "ubuntu_22_04"
+# Uncomment one of the following service sections:
+
+# Equinix Metal configuration
+# [service.equinix]
+# project = "EQUINIX_PROJECT"
+# api_key = "EQUINIX_API_KEY"
+# spot_price_max = 0.2
+# plan = "m3.small.x86"
+# os = "ubuntu_22_04"
+
+# AWS EC2 Spot configuration
+[service.aws]
+region = "ap-south-1"
+access_key = "AWS_ACCESS_KEY_ID"
+secret_key = "AWS_SECRET_ACCESS_KEY"
+session_token = "AWS_SESSION_TOKEN"
+instance_type = "i3.metal"
+ami = "ami-06b6e5225d1db5f46"
+security_group = "sg-0fd0e657f4a331efc"
+spot_price_max = 0.9
+key_name = "divy-mac"
 
 [build.args]
 passthrough = ["BUILD_ARG_1"]
