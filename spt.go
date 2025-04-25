@@ -101,36 +101,92 @@ func NewClient(cfg Config) Client {
 	return Client{metal: client, config: cfg}
 }
 
-func fetchMetadata() Metadata {
+func fetchMetadata() (Metadata, bool) {
 	url := "http://metadata.platformequinix.com/metadata"
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		log.Fatal(err)
+		return Metadata{}, false
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		return Metadata{}, false
 	}
 
 	if resp.StatusCode != 200 {
-		log.Fatalf("Error: %s", resp.Status)
+		return Metadata{}, false
 	}
 
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal(err)
+		return Metadata{}, false
 	}
 
 	var metadata Metadata
 	err = json.Unmarshal(body, &metadata)
 	if err != nil {
-		log.Fatal(err)
+		return Metadata{}, false
 	}
 
-	return metadata
+	return metadata, true
+}
+
+func fetchAWSMetadata() (string, bool) {
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+
+	// Check if it's an EC2 instance by hitting the metadata service
+	tokenUrl := "http://169.254.169.254/latest/api/token"
+	req, err := http.NewRequest("PUT", tokenUrl, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", false
+	}
+
+	tokenBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", false
+	}
+	token := string(tokenBody)
+
+	instanceUrl := "http://169.254.169.254/latest/meta-data/instance-id"
+	req, err = http.NewRequest("GET", instanceUrl, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("X-aws-ec2-metadata-token", token)
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", false
+	}
+
+	instanceBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", false
+	}
+
+	return string(instanceBody), true
 }
 
 type Metadata struct {
@@ -140,19 +196,62 @@ type Metadata struct {
 	Id string `json:"id"`
 }
 
-func NewSelfDevice() *MetalDevice {
-	metadata := fetchMetadata()
+func NewSelfDevice() Device {
+	// Try Equinix Metal first
+	metadata, ok := fetchMetadata()
+	if ok {
+		config := metal.NewConfiguration()
+		config.AddDefaultHeader("X-Auth-Token", metadata.Customdata.ApiKey)
+		client := metal.NewAPIClient(config)
 
-	config := metal.NewConfiguration()
-	config.AddDefaultHeader("X-Auth-Token", metadata.Customdata.ApiKey)
-	client := metal.NewAPIClient(config)
+		device, _, err := client.DevicesApi.FindDeviceById(context.TODO(), metadata.Id).Execute()
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	device, _, err := client.DevicesApi.FindDeviceById(context.TODO(), metadata.Id).Execute()
-	if err != nil {
-		log.Fatal(err)
+		return &MetalDevice{device: device, client: client}
 	}
 
-	return &MetalDevice{device: device, client: client}
+	// Try AWS EC2
+	instanceId, ok := fetchAWSMetadata()
+	if ok {
+		Log("Detected AWS EC2 instance: %s", instanceId)
+
+		// Get region from instance metadata
+		awsCfg, err := config.LoadDefaultConfig(context.TODO())
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		ec2Client := ec2.NewFromConfig(awsCfg)
+
+		// Get the instance's public IP to show in logs
+		input := &ec2.DescribeInstancesInput{
+			InstanceIds: []string{instanceId},
+		}
+
+		result, err := ec2Client.DescribeInstances(context.TODO(), input)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		var ipAddr string
+		if len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+			instance := result.Reservations[0].Instances[0]
+			if instance.PublicIpAddress != nil {
+				ipAddr = *instance.PublicIpAddress
+			}
+		}
+
+		return &AWSInstance{
+			instanceId: instanceId,
+			ipAddr:     ipAddr,
+			client:     ec2Client,
+		}
+	}
+
+	log.Fatal("Could not determine instance type. Are you running on Equinix Metal or AWS EC2?")
+	return nil // unreachable
 }
 
 const userScript = `#!/bin/bash
@@ -168,6 +267,7 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin make
 echo '{ "userland-proxy": false }' > /etc/docker/daemon.json
+sudo usermod -aG docker ubuntu
 systemctl restart docker
 `
 
@@ -618,5 +718,34 @@ func (c *AWSInstance) Delete() {
 	if err != nil {
 		fmt.Println(err)
 		return
+	}
+
+	// Get spot instance request ID
+	describeInput := &ec2.DescribeInstancesInput{
+		InstanceIds: []string{c.instanceId},
+	}
+	result, err := c.client.DescribeInstances(context.TODO(), describeInput)
+	if err != nil {
+		fmt.Println("Error getting spot instance request ID:", err)
+		return
+	}
+
+	if len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+		instance := result.Reservations[0].Instances[0]
+		if instance.SpotInstanceRequestId != nil {
+			spotRequestId := *instance.SpotInstanceRequestId
+			Log("Canceling spot request %s", spotRequestId)
+
+			// Cancel the spot instance request
+			cancelInput := &ec2.CancelSpotInstanceRequestsInput{
+				SpotInstanceRequestIds: []string{spotRequestId},
+			}
+			_, err = c.client.CancelSpotInstanceRequests(context.TODO(), cancelInput)
+			if err != nil {
+				fmt.Println("Error canceling spot instance request:", err)
+				return
+			}
+			Log("Spot request %s canceled", spotRequestId)
+		}
 	}
 }
