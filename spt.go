@@ -45,6 +45,7 @@ type (
 			SecurityGroup string  `toml:"security_group"`
 			SpotPriceMax  float32 `toml:"spot_price_max"`
 			KeyName       string  `toml:"key_name"`
+			VolumeSize    int     `toml:"volume_size"`
 		}
 	}
 
@@ -351,6 +352,21 @@ chmod 600 /opt/spt/aws-credentials.json
 
 	spotPrice := fmt.Sprintf("%f", config.Service.AWS.SpotPriceMax)
 
+	volumeSize := 8
+	if config.Service.AWS.VolumeSize > 0 {
+		volumeSize = config.Service.AWS.VolumeSize
+	}
+
+	blockDeviceMapping := []types.BlockDeviceMapping{
+		{
+			DeviceName: aws.String("/dev/sda1"),
+			Ebs: &types.EbsBlockDevice{
+				VolumeSize: aws.Int32(int32(volumeSize)),
+				VolumeType: types.VolumeTypeGp2,
+			},
+		},
+	}
+
 	input := &ec2.RequestSpotInstancesInput{
 		InstanceCount: aws.Int32(1),
 		SpotPrice:     aws.String(spotPrice),
@@ -367,6 +383,7 @@ chmod 600 /opt/spt/aws-credentials.json
 				}
 				return nil
 			}(),
+			BlockDeviceMappings: blockDeviceMapping,
 		},
 	}
 

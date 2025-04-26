@@ -21,6 +21,7 @@ ami = "ami-06b6e5225d1db5f46"
 security_group = "sg-0fd0e657f4a331efc"
 spot_price_max = 0.9
 key_name = "divy-mac"
+volume_size = 8
 
 [build.args]
 passthrough = ["BUILD_ARG_1"]
